@@ -1,2 +1,4 @@
-streamlit>=1.30
+streamlit>=1.61  # the version this was built and tested on (time_input can be left empty)
 pytest>=7.0
+# Optional: only used when GEMINI_API_KEY is set (LLM-assisted fixes)
+google-genai>=1.0

@@ -3,3 +3,9 @@ __pycache__/
 .venv_new/
 .pytest_cache/
 .DS_Store
+*.log
+.env
+pawpal_data.json
+pawpal_data.json.*
+pawpal_log.json
+pawpal_log.json.*
