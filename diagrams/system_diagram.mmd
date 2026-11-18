@@ -1,0 +1,95 @@
+flowchart TD
+    %% ---------- Input ----------
+    subgraph INPUT["Input: the Streamlit app (app.py)"]
+        U["Pet owner"]
+        CLI["Terminal demo<br/>main.py"]
+        UI["Tabs: Pets, Tasks, Schedule, Log<br/>add / edit / delete tasks,<br/>one shared task for several pets,<br/>Done, Upcoming, Clear completed"]
+        TH["theme.py<br/>light / dark switch"]
+        K[".env or shell variable<br/>GEMINI_API_KEY (optional)<br/>GEMINI_MODEL (optional)"]
+        CFG["config.py<br/>loads .env,<br/>sets up logging"]
+    end
+
+    U --> UI
+    U --> CLI
+    CLI -->|"Generate schedule"| AG
+    TH -.->|"styles"| UI
+
+    %% ---------- Data ----------
+    subgraph DATA["Data (pawpal_system.py, storage.py, fileutil.py)"]
+        D["Owner, Pets, Tasks<br/>shared tasks, repeats,<br/>available-from dates"]
+        J[("pawpal_data.json<br/>pets, tasks, budget")]
+    end
+
+    UI -->|"changes"| D
+    J <-->|"load on start,<br/>atomic save (fileutil.py) after every change,<br/>corrupt file moved aside"| D
+    UI -->|"Generate schedule"| AG
+
+    %% ---------- Process ----------
+    subgraph PROCESS["Process: agentic planning loop (agent.py)"]
+        AG["PlannerAgent<br/>max 5 passes"]
+        PLAN["1. PLAN<br/>Scheduler.generate_schedule()<br/>select (knapsack) + place"]
+        CHECK["2. CHECK (plain code)<br/>overlaps, unplaced tasks,<br/>clashing requested times,<br/>skipped high-priority, meds budget"]
+        FIX["3. FIX<br/>propose: move task X to HH:MM"]
+        LLM["LLMFixer: Gemini 3.8 Flash<br/>(google-genai, free tier)<br/>used only if a key is set"]
+        RULES["Rule-based fixer<br/>default and fallback"]
+        GUARD["Guardrails<br/>same day, max shift 4 h (30 min for meds),<br/>max 2 moves per task,<br/>not completed or flexible"]
+        APPLY["4. APPLY<br/>edit task requested time<br/>(original kept for undo)"]
+        ROLL["Rollback to best plan seen<br/>if a pass made things worse"]
+    end
+
+    D --> AG
+    K -.-> CFG
+    CFG -.->|"API key"| LLM
+    AG --> PLAN --> CHECK
+    CHECK -->|"blocking issues"| FIX
+    FIX --> LLM
+    FIX --> RULES
+    LLM -->|"bad JSON / API error"| RULES
+    LLM --> GUARD
+    RULES --> GUARD
+    GUARD -->|"rejected moves logged"| FIX
+    GUARD -->|"accepted moves"| APPLY
+    APPLY -->|"re-plan"| PLAN
+    CHECK -->|"clean, no safe fix,<br/>or pass limit"| ROLL
+    APPLY -.->|"edited times saved"| J
+
+    %% ---------- Output ----------
+    subgraph OUTPUT["Output"]
+        SCHED["Day plan timeline<br/>by time or priority, per pet,<br/>with reasons"]
+        REPORT["Agent report:<br/>passes, changes,<br/>unresolved problems, advice"]
+        SHARE["Share panel (sharing.py)<br/>plain text with copy button,<br/>.txt download, emoji and 24h options"]
+        LOGJ[("pawpal_log.json<br/>warnings, errors, agent activity<br/>eventlog.py")]
+        LOGT[("pawpal_agent.log<br/>full text log")]
+        LOGV["Log tab<br/>view, remove, clear,<br/>download"]
+    end
+
+    ROLL --> SCHED
+    ROLL --> REPORT
+    SCHED --> SHARE
+    AG -.->|"logs every step"| LOGJ
+    GUARD -.->|"rejected moves"| LOGJ
+    J -.->|"save and load errors"| LOGJ
+    AG -.-> LOGT
+    LOGJ <--> LOGV
+    UI -.->|"rejected edits, failed saves"| LOGJ
+    CFG -.->|"routes logs to both files"| LOGJ
+
+    %% ---------- Human and test checks ----------
+    subgraph REVIEW["Human and automated checking"]
+        H["Human review:<br/>reads the report, accepts the plan,<br/>clicks Undo agent changes,<br/>or edits tasks and regenerates"]
+        F["Family and friends<br/>receive the pasted schedule"]
+        T["pytest suite (101 tests)<br/>agent (fake LLM), scheduler,<br/>storage, sharing, logging, file safety, live reload"]
+        DR["devreload.py<br/>reloads edited code<br/>without a restart"]
+    end
+
+    SCHED --> H
+    REPORT --> H
+    SHARE --> H
+    H -->|"copies and sends"| F
+    H -->|"Undo: restore original times"| D
+    H -->|"edits tasks / budget"| UI
+    T -.->|"verifies"| PROCESS
+    T -.->|"verifies"| DATA
+    T -.->|"verifies"| SHARE
+    DR -.->|"keeps the running app current"| UI
+    LOGV -.->|"what failed and why"| H

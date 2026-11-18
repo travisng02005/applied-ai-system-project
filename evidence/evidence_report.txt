@@ -1,0 +1,192 @@
+PawPal+ reproducible execution evidence
+Python 3.13.14 | planned day: Tuesday, October 20, 2026
+Reproduce with:  python run_evidence.py
+
+==============================================================================
+PART 1. END-TO-END RUNS
+==============================================================================
+
+--- Case 1: two pets, six tasks, clashing requested times (real CLI commands)
+INPUT (built into main.py):
+  Buddy        Evening feeding   10 min  HIGH   requested 18:00
+  Buddy        Brush coat        20 min  LOW    flexible
+  Buddy        Morning walk      30 min  HIGH   requested 08:00
+  Mia          Playtime          25 min  MEDIUM requested 12:00
+  Mia          Thyroid meds       5 min  HIGH   requested 08:15
+  Mia          Breakfast         10 min  HIGH   requested 08:00
+
+$ python main.py --no-agent --date 2026-10-20        # the scheduler on its own
+Oct 20 Schedule · Travis · Tuesday, October 20
+───────────────────────────────────────────────────────────
+TIME          PET     TASK              PRIORITY   DURATION
+───────────────────────────────────────────────────────────
+08:00-08:30   Buddy   Morning walk      HIGH         30 min
+08:30-08:40   Mia     Breakfast         HIGH         10 min
+              ↳ due 08:00, shifted +30 min to 08:30 (slot taken)
+08:40-08:45   Mia     Thyroid meds      HIGH          5 min
+              ↳ due 08:15, shifted +25 min to 08:40 (slot taken)
+08:45-09:05   Buddy   Brush coat        LOW          20 min
+              ↳ flexible time
+12:00-12:25   Mia     Playtime          MEDIUM       25 min
+18:00-18:10   Buddy   Evening feeding   HIGH         10 min
+───────────────────────────────────────────────────────────
+Planned 100 of 120 min  [█████████████████░░░] 83%
+
+⚠ Buddy: Morning walk (08:00) is at the same time as Mia: Breakfast (08:00) [different pets]
+⚠ Buddy: Morning walk (08:00) overlaps Mia: Thyroid meds (08:15) [different pets]
+
+$ python main.py --date 2026-10-20                   # with the planning agent
+Oct 20 Schedule · Travis · Tuesday, October 20
+───────────────────────────────────────────────────────────
+TIME          PET     TASK              PRIORITY   DURATION
+───────────────────────────────────────────────────────────
+08:00-08:30   Buddy   Morning walk      HIGH         30 min
+08:30-08:40   Mia     Breakfast         HIGH         10 min
+08:40-08:45   Mia     Thyroid meds      HIGH          5 min
+08:45-09:05   Buddy   Brush coat        LOW          20 min
+              ↳ flexible time
+12:00-12:25   Mia     Playtime          MEDIUM       25 min
+18:00-18:10   Buddy   Evening feeding   HIGH         10 min
+───────────────────────────────────────────────────────────
+Planned 100 of 120 min  [█████████████████░░░] 83%
+
+Planning agent (fixes by: rules)
+Pass 1: 2 issue(s) found
+  ! Requested times clash: Buddy: Morning walk (08:00) and Mia: Breakfast (08:00)
+  ! Requested times clash: Buddy: Morning walk (08:00) and Mia: Thyroid meds (08:15)
+  -> move Mia: Breakfast 08:00 -> 08:30 (requested time clashed with Buddy: Morning walk)
+  -> move Mia: Thyroid meds 08:15 -> 08:40 (requested time clashed with Buddy: Morning walk)
+Pass 2: 0 issue(s) found
+  Plan passed all checks.
+Result: plan passed all checks
+
+--- Case 2: a task shared by two pets, saved, edited, finished (modules, temp files)
+INPUT: one 'Vet call' for Mochi AND Mia at 07:30 (30 min, HIGH), plus a flexible 'Brush coat'
+
+OUTPUT 1: saved data file (pawpal_data.json), the shared task is ONE entry:
+  {"title": "Vet call", "due": "2026-10-20T07:30:00", "shared_with": ["Mia"], "completed": false}
+OUTPUT 2: reloaded from disk: 2 tasks, 'Vet call' is for Mochi & Mia
+OUTPUT 3: edited in place: now 45 min at 09:00
+OUTPUT 4: planned and shared as text:
+  🐾 Pet care schedule for Travis
+  Tuesday, October 20
+  
+  8:00 AM - 8:20 AM  🐶 Mochi: Brush coat
+  9:00 AM - 9:45 AM  🐶🐱 Mochi & Mia: Vet call
+  
+  Total: 65 min of 120 available
+OUTPUT 5: editing the finished task is refused -> ValueError: a completed task can't be edited
+OUTPUT 6: 'Clear completed' removed 1 task; left: ['Brush coat']
+
+--- Case 3: an overbooked day (60 minutes available, 105 minutes of HIGH priority work)
+INPUT:
+  Rex          Long hike         50 min  HIGH   flexible
+  Rex          Swim              50 min  HIGH   flexible
+  Rex          Eye drops          5 min  HIGH   flexible
+OUTPUT:
+Oct 20 Schedule · Travis · Tuesday, October 20
+───────────────────────────────────────────────────
+TIME          PET   TASK        PRIORITY   DURATION
+───────────────────────────────────────────────────
+08:00-08:05   Rex   Eye drops   HIGH          5 min
+              ↳ flexible time
+08:05-08:55   Rex   Long hike   HIGH         50 min
+              ↳ flexible time
+───────────────────────────────────────────────────
+Skipped (no time left)
+  • Rex: Swim (50 min)
+───────────────────────────────────────────────────
+Planned 55 of 60 min  [██████████████████░░] 92%
+Planning agent (fixes by: rules)
+Pass 1: 1 issue(s) found
+  ! High-priority task skipped for lack of time: Rex: Swim (50 min); roughly 45 more minutes in the daily budget would help
+  Plan passed all checks.
+Result: plan passed all checks
+  advice: High-priority task skipped for lack of time: Rex: Swim (50 min); roughly 45 more minutes in the daily budget would help
+
+==============================================================================
+PART 2. AI FEATURE BEHAVIOUR (planning agent: plan, check, fix, repeat)
+==============================================================================
+The Gemini replies below are SCRIPTED stand-ins (deterministic and offline). A real, live
+Gemini excerpt is in the README (Sample interactions, example 2).
+
+--- Case A: Gemini proposes a fix and the agent applies it
+SCRIPTED Gemini reply: {"moves": [{"task_id": "T6", "new_time": "09:10", "reason": "Move breakfast after the walk"}]}
+OUTPUT:
+Planning agent (fixes by: Gemini, with the rules finishing the rest)
+Pass 1: 2 issue(s) found
+  ! Requested times clash: Buddy: Morning walk (08:00) and Mia: Breakfast (08:00)
+  ! Requested times clash: Buddy: Morning walk (08:00) and Mia: Thyroid meds (08:15)
+  -> move Mia: Breakfast 08:00 -> 09:10 (Move breakfast after the walk)
+Pass 2: 1 issue(s) found
+  ! Requested times clash: Buddy: Morning walk (08:00) and Mia: Thyroid meds (08:15)
+  -> move Mia: Thyroid meds 08:15 -> 08:30 (requested time clashed with Buddy: Morning walk)
+  x rejected: Mia: Breakfast: no change
+Pass 3: 0 issue(s) found
+  Plan passed all checks.
+Result: plan passed all checks
+(Pass 2: the scripted Gemini repeats its same move, which is now a no-op and is rejected, so the rules finish the remaining clash.)
+
+--- Case B: Gemini fails (quota error), the agent falls back to its rules
+SCRIPTED Gemini failure: 429 RESOURCE_EXHAUSTED: You exceeded your current quota
+OUTPUT:
+Planning agent (fixes by: rules (Gemini was unavailable or its suggestions were unusable))
+Pass 1: 2 issue(s) found
+  ! Requested times clash: Buddy: Morning walk (08:00) and Mia: Breakfast (08:00)
+  ! Requested times clash: Buddy: Morning walk (08:00) and Mia: Thyroid meds (08:15)
+  -> move Mia: Breakfast 08:00 -> 08:30 (requested time clashed with Buddy: Morning walk)
+  -> move Mia: Thyroid meds 08:15 -> 08:40 (requested time clashed with Buddy: Morning walk)
+Pass 2: 0 issue(s) found
+  Plan passed all checks.
+Result: plan passed all checks
+Recorded in the JSON activity log (what the app's Log tab shows):
+  [WARNING] agent: LLM fixer failed (RuntimeError: 429 RESOURCE_EXHAUSTED: You exceeded your current quota); f...
+
+==============================================================================
+PART 3. RELIABILITY AND GUARDRAIL RESULTS
+==============================================================================
+
+--- Guardrail 1: unsafe or invalid Gemini moves are rejected
+SCRIPTED Gemini reply: {"moves": [{"task_id": "T5", "new_time": "14:00", "reason": "meds six hours late"}, {"task_id": "T99", "new_time": "09:00", "reason": "a task that does not exist"}, {"task_id": "T6", "new_time": "25:99", "reason": "not a real time"}]}
+OUTPUT:
+Planning agent (fixes by: rules (Gemini was unavailable or its suggestions were unusable))
+Pass 1: 2 issue(s) found
+  ! Requested times clash: Buddy: Morning walk (08:00) and Mia: Breakfast (08:00)
+  ! Requested times clash: Buddy: Morning walk (08:00) and Mia: Thyroid meds (08:15)
+  -> move Mia: Breakfast 08:00 -> 08:30 (requested time clashed with Buddy: Morning walk)
+  -> move Mia: Thyroid meds 08:15 -> 08:40 (requested time clashed with Buddy: Morning walk)
+  x rejected: Mia: Thyroid meds: shift of 345 min exceeds the 30 min limit
+Pass 2: 0 issue(s) found
+  Plan passed all checks.
+Result: plan passed all checks
+Invalid moves that never got that far (recorded in the activity log):
+  [WARNING] agent: Ignoring malformed LLM move {'task_id': 'T99', 'new_time': '09:00', 'reason': 'a task that ...
+  [WARNING] agent: Ignoring malformed LLM move {'task_id': 'T6', 'new_time': '25:99', 'reason': 'not a real ti...
+  [WARNING] agent: Rejected move for Mia: Thyroid meds: shift of 345 min exceeds the 30 min limit
+RESULT: Thyroid meds moved 25 min (limit 30), not 345; no unknown task was touched
+
+--- Guardrail 2: a problem the agent cannot safely fix is reported, not forced
+OUTPUT:
+Planning agent (fixes by: rules)
+Pass 1: 1 issue(s) found
+  ! Requested times clash: Mia: Thyroid pill A (08:00) and Mia: Thyroid pill B (08:00)
+  x rejected: Mia: Thyroid pill B: shift of 60 min exceeds the 30 min limit
+  No safe fix available; stopping.
+Result: 1 problem(s) remain
+RESULT: agent resolved the plan: False (expected False: it refuses to push a medication an hour late)
+
+--- Guardrail 3: a corrupt data file is moved aside, never overwritten
+OUTPUT: StorageError: Expecting property name enclosed in double quotes: line 1 column 3 (char 2) (the file was moved to corrupt_data.json.corrupt-<timestamp>)
+RESULT: the corrupt file was kept as a backup, not overwritten: ['corrupt_data.json.corrupt-<timestamp>']
+  [ERROR] storage: Could not load <tmp>/corrupt_data.json (Expecting property name enclosed in double quotes: ...
+
+--- Guardrail 4: a failed save is logged (once) and reported, not hidden
+OUTPUT: save_owner returned False (it did not raise)
+  [ERROR] storage: Could not save <tmp>/a_file/data.json: [WinError 183] Cannot create a file when that file a...
+
+==============================================================================
+PART 4. AUTOMATED TEST SUITE
+==============================================================================
+$ python -m pytest -q
+101 passed in 4.35s
+Tests per file: test_agent.py=18, test_app_times.py=8, test_devreload.py=2, test_eventlog.py=9, test_fileutil.py=5, test_pawpal_system.py=42, test_sharing.py=5, test_storage.py=12
