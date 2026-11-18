@@ -3,6 +3,8 @@ import sys
 from datetime import date, datetime, time
 from typing import Optional
 
+from agent import LLMFixer, PlannerAgent
+from config import configure_logging
 from pawpal_system import (
     Category,
     Frequency,
@@ -67,7 +69,7 @@ def find_pet(owner: Owner, name: str) -> Pet:
 
 def pet_name(task: Task) -> str:
     """The task's pet name, or '?' for an unattached task."""
-    return task.pet.name if task.pet else "?"
+    return task.pet_names()
 
 
 def needs_explanation(item: ScheduledItem) -> bool:
@@ -161,7 +163,7 @@ def format_schedule(
         out += [f"  • {pet_name(t)}: {t.title} ({t.duration_minutes} min)" for t in skipped]
         out.append(rule)
 
-    unplaced = [(t, why) for t, why in scheduler.unplaced if pet is None or t.pet is pet]
+    unplaced = [(t, why) for t, why in scheduler.unplaced if pet is None or t.involves(pet)]
     if unplaced:
         out.append("Could not be placed")
         out += [f"  • {pet_name(t)}: {t.title} ({why})" for t, why in unplaced]
@@ -260,6 +262,10 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--budget", type=int, default=120, metavar="MIN",
                         help="available minutes for the day (default: 120)")
     parser.add_argument("--list-pets", action="store_true", help="list pets and exit")
+    parser.add_argument("--no-agent", action="store_true",
+                        help="plan once with the Scheduler only (skip the planning agent)")
+    parser.add_argument("--llm", action="store_true",
+                        help="let Gemini propose the agent's fixes (needs GEMINI_API_KEY)")
     parser.add_argument("--extras", action="store_true",
                         help="also show conflicts, next task and recurrence demo")
     args = parser.parse_args(argv)
@@ -286,9 +292,21 @@ def main(argv: Optional[list[str]] = None) -> None:
     except LookupError as err:
         sys.exit(str(err))
 
+    configure_logging()
     scheduler = Scheduler(owner)
-    scheduler.generate_schedule(args.date)
+    if args.no_agent:
+        scheduler.generate_schedule(args.date)
+        agent_result = None
+    else:
+        llm = LLMFixer.from_env() if args.llm else None
+        if args.llm and llm is None:
+            print("Note: --llm needs GEMINI_API_KEY and the google-genai package; "
+                  "using the rule-based fixer.")
+        agent_result = PlannerAgent(scheduler, llm).run(args.date)
     print(format_schedule(scheduler, args.date, pet))
+    if agent_result is not None:
+        print()
+        print(agent_result.summary())
     if args.extras:
         print(format_extras(scheduler, at(args.date, 9)))
         print(format_views(scheduler))
