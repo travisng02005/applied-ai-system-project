@@ -26,6 +26,10 @@ class Frequency(Enum):
     WEEKLY = "weekly"
 
 
+# One icon per species, used wherever a pet is shown (app and shared text).
+SPECIES_EMOJI = {"dog": "🐶", "cat": "🐱"}
+OTHER_PET_EMOJI = "🐾"
+
 PRIORITY_WEIGHT = 10
 OVERDUE_BONUS = 15
 DEFAULT_MAX_DELAY_MINUTES = 60
@@ -45,9 +49,15 @@ class Task:
     due: Optional[datetime] = None
     frequency: Frequency = Frequency.ONCE
     completed: bool = False
+    # For repeating tasks with no requested time: the first day the next occurrence
+    # is due. Until then it waits in "upcoming" instead of reappearing right away.
+    available_from: Optional[date] = None
     # Back-reference set by Pet.add_task; excluded from repr/eq to avoid
     # infinite recursion (Pet -> Task -> Pet ...).
     pet: Optional["Pet"] = field(default=None, repr=False, compare=False)
+    # Other pets this one task is also for (e.g. walking two dogs together). The task
+    # lives in `pet.tasks` only, so it is planned, completed and listed once.
+    shared_with: list["Pet"] = field(default_factory=list, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Reject non-positive durations at creation time."""
@@ -74,9 +84,30 @@ class Task:
             while next_due <= completed_at:
                 next_due += step
         next_task = replace(self, due=next_due, completed=False)
+        if next_due is None:  # flexible task: next one is available a period from now
+            done_on = (completed_at or datetime.now()).date()
+            next_task.available_from = done_on + step
+        next_task.shared_with = list(self.shared_with)  # same pets, own list
         if self.pet is not None:
             self.pet.add_task(next_task)
         return next_task
+
+    def pets(self) -> list["Pet"]:
+        """Every pet this task is for: its main pet first, then the shared ones."""
+        return ([self.pet] if self.pet is not None else []) + list(self.shared_with)
+
+    def involves(self, pet: "Pet") -> bool:
+        """True if the task is for this pet (main or shared), matched by identity."""
+        return any(p is pet for p in self.pets())
+
+    def pet_names(self) -> str:
+        """'Buddy' or 'Buddy & Mia'; '?' for a task with no pet."""
+        names = [p.name for p in self.pets()]
+        return " & ".join(names) if names else "?"
+
+    def pet_icons(self) -> str:
+        """One emoji per pet the task is for, e.g. '🐶🐱' ('🐾' for a task with no pet)."""
+        return "".join(p.emoji for p in self.pets()) or OTHER_PET_EMOJI
 
     def reschedule(self, new_due: datetime) -> None:
         """Move the task's due time to new_due."""
@@ -123,6 +154,11 @@ class Pet:
         for task in self.tasks:
             task.pet = self
 
+    @property
+    def emoji(self) -> str:
+        """The pet's icon: a dog or cat for those species, a paw print for anything else."""
+        return SPECIES_EMOJI.get(self.species, OTHER_PET_EMOJI)
+
     def add_task(self, task: Task) -> None:
         """Append the task and set task.pet = self."""
         if any(t is task for t in self.tasks):
@@ -163,8 +199,94 @@ class Owner:
             self.pets.append(pet)
 
     def remove_pet(self, pet: Pet) -> None:
-        """Remove a pet (matched by identity) from this owner."""
+        """Remove a pet (matched by identity) from this owner.
+
+        Shared tasks owned by other pets stay, just no longer shared with this pet.
+        """
         self.pets = [p for p in self.pets if p is not pet]
+        for task in self.get_all_tasks():
+            task.shared_with = [p for p in task.shared_with if p is not pet]
+
+    def add_shared_task(self, pets: list[Pet], task: Task) -> Task:
+        """Add ONE task that is for several pets.
+
+        The first pet becomes the task's main pet (it holds the task); the rest are
+        recorded in task.shared_with. Pets this owner doesn't have, and duplicates,
+        are ignored. Raises ValueError if no valid pet is left.
+        """
+        owned = self._owned_pets(pets)
+        owned[0].add_task(task)
+        task.shared_with = owned[1:]
+        return task
+
+    def _owned_pets(self, pets: list[Pet]) -> list[Pet]:
+        """The given pets that this owner has, without duplicates; ValueError if none."""
+        owned: list[Pet] = []
+        for pet in pets:
+            if any(p is pet for p in self.pets) and not any(p is pet for p in owned):
+                owned.append(pet)
+        if not owned:
+            raise ValueError("a task needs at least one of this owner's pets")
+        return owned
+
+    def edit_task(
+        self,
+        task: Task,
+        *,
+        title: str,
+        category: Category,
+        duration_minutes: int,
+        priority: Priority,
+        due: Optional[datetime],
+        frequency: Frequency,
+        pets: list[Pet],
+    ) -> None:
+        """Change an existing task in place, including which pets it is for.
+
+        Everything is validated before anything changes, so a bad edit leaves the task
+        untouched. The first pet in `pets` holds the task (it is moved there if needed)
+        and the rest share it. Giving the task a time clears any "available from" wait.
+        Raises ValueError for a completed task (finished tasks are read-only), a blank title,
+        a non-positive duration, or no valid pet.
+        """
+        if task.completed:
+            raise ValueError("a completed task can't be edited")
+        if not title.strip():
+            raise ValueError("title cannot be blank")
+        if duration_minutes <= 0:
+            raise ValueError("duration_minutes must be positive")
+        owned = self._owned_pets(pets)
+        task.title = title.strip()
+        task.category = category
+        task.duration_minutes = duration_minutes
+        task.priority = priority
+        task.due = due
+        task.frequency = frequency
+        if due is not None:
+            task.available_from = None
+        owned[0].add_task(task)  # moves it off its old pet if the main pet changed
+        task.shared_with = owned[1:]
+
+    def delete_task(self, task: Task) -> None:
+        """Remove a task from whichever pet holds it."""
+        if task.pet is not None:
+            task.pet.remove_task(task)
+        task.shared_with = []
+
+    def clear_completed(self, tasks: Optional[list[Task]] = None) -> int:
+        """Permanently delete completed tasks; returns how many were removed.
+
+        With `tasks`, only those (and only if completed) are removed; otherwise every
+        completed task of every pet. Pending tasks are never touched.
+        """
+        wanted = None if tasks is None else {id(t) for t in tasks}
+        removed = 0
+        for pet in self.pets:
+            for task in list(pet.tasks):
+                if task.completed and (wanted is None or id(task) in wanted):
+                    pet.remove_task(task)
+                    removed += 1
+        return removed
 
     def get_all_tasks(self) -> list[Task]:
         """Every pet's tasks in one list; each task's .pet says whose it is."""
@@ -261,13 +383,14 @@ class Scheduler:
             return [f"Could not check for conflicts: {err}"]
         warnings = []
         for a, b in pairs:
-            if pet is not None and a.pet is not pet and b.pet is not pet:
+            if pet is not None and not a.involves(pet) and not b.involves(pet):
                 continue
-            kind = "same pet" if a.pet is b.pet else "different pets"
+            same = any(p is q for p in a.pets() for q in b.pets())
+            kind = "same pet" if same else "different pets"
             verb = "is at the same time as" if a.due == b.due else "overlaps"
             warnings.append(
-                f"{a.pet.name if a.pet else '?'}: {a.title} ({a.due:%H:%M}) {verb} "
-                f"{b.pet.name if b.pet else '?'}: {b.title} ({b.due:%H:%M}) [{kind}]"
+                f"{a.pet_names()}: {a.title} ({a.due:%H:%M}) {verb} "
+                f"{b.pet_names()}: {b.title} ({b.due:%H:%M}) [{kind}]"
             )
         return warnings
 
@@ -279,11 +402,11 @@ class Scheduler:
 
     def get_schedule_for(self, pet: Pet) -> list[ScheduledItem]:
         """One pet's slice of the plan, in time order."""
-        return [item for item in self.sort_by_time() if item.task.pet is pet]
+        return [item for item in self.sort_by_time() if item.task.involves(pet)]
 
     def get_skipped_for(self, pet: Pet) -> list[Task]:
         """Tasks for one pet that didn't fit in the time budget."""
-        return [task for task in self.skipped_tasks if task.pet is pet]
+        return [task for task in self.skipped_tasks if task.involves(pet)]
 
     def filter_tasks(
         self,
@@ -295,9 +418,9 @@ class Scheduler:
         and/or category."""
         if isinstance(pet, str):
             name = pet.lower()
-            match = lambda t: t.pet is not None and t.pet.name.lower() == name
+            match = lambda t: any(p.name.lower() == name for p in t.pets())
         else:
-            match = lambda t: pet is None or t.pet is pet
+            match = lambda t: pet is None or t.involves(pet)
         return [
             task
             for task in self.owner.get_all_tasks()
@@ -312,13 +435,13 @@ class Scheduler:
             return "Nothing to schedule."
         lines = []
         for item in self.sort_by_time():
-            pet = item.task.pet.name if item.task.pet else "?"
+            pet = item.task.pet_names()
             lines.append(
                 f"{item.start:%H:%M}-{item.end:%H:%M}  {pet}: "
                 f"{item.task.title} ({item.task.priority.name} priority, {item.reason})"
             )
         for task in self.skipped_tasks:
-            pet = task.pet.name if task.pet else "?"
+            pet = task.pet_names()
             lines.append(
                 f"SKIPPED  {pet}: {task.title} "
                 f"({task.duration_minutes} min did not fit in the time budget)"
@@ -342,7 +465,9 @@ class Scheduler:
         return [
             task
             for task in self.owner.get_all_tasks()
-            if not task.completed and (task.due is None or task.due.date() <= on_date)
+            if not task.completed
+            and (task.due is None or task.due.date() <= on_date)
+            and (task.available_from is None or task.available_from <= on_date)
         ]
 
     def _rank(self, tasks: list[Task]) -> list[Task]:

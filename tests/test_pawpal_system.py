@@ -1,3 +1,4 @@
+import pytest
 from pawpal_system import Pet, Task
 
 
@@ -278,3 +279,205 @@ def test_schedule_never_exceeds_budget_or_overlaps():
     s = plan([pet], budget=90)
     assert sum(i.task.duration_minutes for i in s.schedule) <= 90
     assert s.detect_conflicts() == []
+
+
+def two_pets():
+    owner = Owner("T")
+    rex, mia = Pet("Rex", "dog"), Pet("Mia", "cat")
+    owner.add_pet(rex)
+    owner.add_pet(mia)
+    return owner, rex, mia
+
+
+def test_shared_task_is_one_task_for_several_pets():
+    owner, rex, mia = two_pets()
+
+    task = owner.add_shared_task([rex, mia, rex], Task("Vet visit", due=D))
+
+    assert owner.get_all_tasks() == [task]  # a single task, listed once
+    assert task.pet is rex and task.shared_with == [mia]
+    assert task.pet_names() == "Rex & Mia"
+    assert task.involves(rex) and task.involves(mia)
+    assert len(rex.tasks) == 1 and mia.tasks == []
+
+
+def test_shared_task_shows_up_in_each_pets_views_and_plans_once():
+    owner, rex, mia = two_pets()
+    task = owner.add_shared_task([rex, mia], Task("Walk", duration_minutes=30, due=D))
+    scheduler = Scheduler(owner)
+
+    scheduler.generate_schedule(D.date())
+
+    assert len(scheduler.schedule) == 1  # one slot, not two
+    assert scheduler.detect_conflicts() == [] and scheduler.detect_task_conflicts() == []
+    assert scheduler.filter_tasks(pet=mia) == [task]
+    assert scheduler.filter_tasks(pet="rex") == [task]
+    assert [i.task for i in scheduler.get_schedule_for(mia)] == [task]
+
+
+def test_completing_a_shared_task_completes_it_for_everyone_and_recurrence_stays_shared():
+    owner, rex, mia = two_pets()
+    task = owner.add_shared_task([rex, mia], Task("Walk", due=D, frequency=Frequency.DAILY))
+
+    nxt = task.mark_complete()
+
+    assert task.completed
+    assert nxt.shared_with == [mia] and nxt.shared_with is not task.shared_with
+    assert nxt.pet is rex
+
+
+def test_shared_task_conflicts_with_another_task_for_either_pet():
+    owner, rex, mia = two_pets()
+    owner.add_shared_task([rex, mia], Task("Walk", due=D))
+    mia.add_task(Task("Feed", due=D))
+    scheduler = Scheduler(owner)
+
+    warnings = scheduler.conflict_warnings(D.date())
+
+    assert len(warnings) == 1
+    assert "same pet" in warnings[0] and "Rex & Mia" in warnings[0]
+
+
+def test_removing_a_pet_unshares_tasks_but_keeps_them():
+    owner, rex, mia = two_pets()
+    task = owner.add_shared_task([rex, mia], Task("Walk"))
+
+    owner.remove_pet(mia)
+
+    assert task.shared_with == [] and owner.get_all_tasks() == [task]
+
+
+def test_add_shared_task_needs_a_valid_pet():
+    owner, rex, mia = two_pets()
+    with pytest.raises(ValueError):
+        owner.add_shared_task([Pet("Ghost", "cat")], Task("Walk"))
+
+
+def test_flexible_repeating_task_does_not_reappear_today_after_completion():
+    owner, rex, _ = two_pets()
+    task = Task("Brush", frequency=Frequency.DAILY)  # no requested time
+    rex.add_task(task)
+
+    nxt = task.mark_complete(completed_at=D)
+
+    assert nxt.due is None and nxt.available_from == D.date() + timedelta(days=1)
+    scheduler = Scheduler(owner)
+    scheduler.generate_schedule(D.date())
+    assert scheduler.schedule == []  # tomorrow's copy is not planned today
+    scheduler.generate_schedule(D.date() + timedelta(days=1))
+    assert [i.task for i in scheduler.schedule] == [nxt]
+
+
+def test_clear_completed_removes_only_completed_tasks():
+    owner, rex, mia = two_pets()
+    done_a, done_b = Task("Done A"), Task("Done B")
+    pending = Task("Pending")
+    rex.add_task(done_a)
+    rex.add_task(pending)
+    shared = owner.add_shared_task([mia, rex], done_b)
+    done_a.mark_complete()
+    done_b.mark_complete()
+
+    assert owner.clear_completed() == 2
+
+    assert owner.get_all_tasks() == [pending]
+    assert shared.pet is None  # removed tasks are detached
+
+
+def test_clear_completed_can_be_limited_to_given_tasks():
+    owner, rex, _ = two_pets()
+    a, b = Task("A"), Task("B")
+    rex.add_task(a)
+    rex.add_task(b)
+    a.mark_complete()
+    b.mark_complete()
+
+    assert owner.clear_completed([a]) == 1
+    assert owner.get_all_tasks() == [b]
+
+
+def test_edit_task_changes_every_field_in_place():
+    owner, rex, mia = two_pets()
+    task = Task("Walk", Category.WALK, 20, Priority.LOW, D, Frequency.ONCE)
+    rex.add_task(task)
+
+    owner.edit_task(task, title="  Long walk ", category=Category.PLAY, duration_minutes=45,
+                    priority=Priority.HIGH, due=None, frequency=Frequency.DAILY, pets=[rex])
+
+    assert (task.title, task.category, task.duration_minutes) == ("Long walk", Category.PLAY, 45)
+    assert (task.priority, task.due, task.frequency) == (Priority.HIGH, None, Frequency.DAILY)
+    assert owner.get_all_tasks() == [task]  # same task, not a copy
+
+
+def test_edit_task_can_move_it_to_other_pets_and_share_it():
+    owner, rex, mia = two_pets()
+    task = Task("Walk")
+    rex.add_task(task)
+
+    owner.edit_task(task, title="Walk", category=Category.WALK, duration_minutes=20,
+                    priority=Priority.MEDIUM, due=None, frequency=Frequency.ONCE, pets=[mia, rex])
+
+    assert task.pet is mia and task.shared_with == [rex]
+    assert rex.tasks == [] and mia.tasks == [task]
+    assert task.involves(rex) and task.involves(mia)
+
+
+def test_edit_task_with_bad_input_changes_nothing():
+    owner, rex, _ = two_pets()
+    task = Task("Walk", duration_minutes=20)
+    rex.add_task(task)
+    good = dict(category=Category.WALK, priority=Priority.HIGH, due=None,
+                frequency=Frequency.ONCE, pets=[rex])
+
+    for bad in (dict(title=" ", duration_minutes=10), dict(title="X", duration_minutes=0),
+                dict(title="X", duration_minutes=10, pets=[Pet("Ghost", "cat")])):
+        with pytest.raises(ValueError):
+            owner.edit_task(task, **{**good, **bad})
+
+    assert (task.title, task.duration_minutes, task.priority) == ("Walk", 20, Priority.MEDIUM)
+
+
+def test_editing_a_time_clears_the_available_from_wait():
+    from datetime import date
+    owner, rex, _ = two_pets()
+    task = Task("Brush", available_from=date(2026, 10, 25))
+    rex.add_task(task)
+
+    owner.edit_task(task, title="Brush", category=Category.GENERAL, duration_minutes=15,
+                    priority=Priority.MEDIUM, due=D, frequency=Frequency.ONCE, pets=[rex])
+
+    assert task.available_from is None
+
+
+def test_delete_task_removes_it_for_all_its_pets():
+    owner, rex, mia = two_pets()
+    task = owner.add_shared_task([rex, mia], Task("Vet"))
+
+    owner.delete_task(task)
+
+    assert owner.get_all_tasks() == [] and not task.involves(mia)
+
+
+def test_pet_and_task_icons_come_from_one_place():
+    owner = Owner("T")
+    rex, mia, koi = Pet("Rex", "dog"), Pet("Mia", "cat"), Pet("Koi", "fish")
+    for pet in (rex, mia, koi):
+        owner.add_pet(pet)
+    shared = owner.add_shared_task([rex, mia, koi], Task("Vet"))
+
+    assert (rex.emoji, mia.emoji, koi.emoji) == ("🐶", "🐱", "🐾")
+    assert shared.pet_icons() == "🐶🐱🐾"
+    assert Task("Loose task").pet_icons() == "🐾"  # no pet attached
+
+
+def test_a_completed_task_cannot_be_edited():
+    owner, rex, _ = two_pets()
+    task = Task("Walk", duration_minutes=20, priority=Priority.LOW)
+    rex.add_task(task)
+    task.mark_complete()
+
+    with pytest.raises(ValueError, match="completed"):
+        owner.edit_task(task, title="Changed", category=Category.PLAY, duration_minutes=45,
+                        priority=Priority.HIGH, due=None, frequency=Frequency.DAILY, pets=[rex])
+
+    assert (task.title, task.duration_minutes, task.priority) == ("Walk", 20, Priority.LOW)
